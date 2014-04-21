@@ -32,3 +32,8 @@ out
 log
 *.log
 *.html
+
+# l33
+.project
+.cproject
+Debug
