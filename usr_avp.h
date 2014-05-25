@@ -86,6 +86,9 @@ int init_extra_avps();
 
 struct usr_avp* new_avp(unsigned short flags, int name, int_str val);
 
+/* l33: make function visible in action.c */
+int new_avp_alias(str *alias);
+
 /* add functions */
 int add_avp( unsigned short flags, int id, int_str val);
 int add_avp_last( unsigned short flags, int id, int_str val);

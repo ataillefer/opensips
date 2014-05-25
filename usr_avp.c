@@ -504,7 +504,8 @@ static int lookup_avp_alias_str(str *alias, int extra)
 	return id;
 }
 
-static inline int new_avp_alias(str *alias)
+/* l33: make function visible in action.c */
+int new_avp_alias(str *alias)
 {
 	int id = last_avp_index + 1;
 
