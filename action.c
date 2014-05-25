@@ -76,6 +76,8 @@
 #include "xlog.h"
 #include "evi/evi_modules.h"
 
+#include "usr_avp.h"
+
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netdb.h>
@@ -1533,28 +1535,36 @@ int do_action(struct action* a, struct sip_msg* msg)
 
 				LM_DBG("The query expects %d results back\n",val_number);
 
+				/* run raw query */
 				ret = cachedb_raw_query( &a->elem[0].u.s, &name_s, &cdb_reply,val_number,&key_number);
-				if (ret >= 0 && val_number > 0) {
-					for (i=key_number-1; i>=0;i--) {
-						it=cdb_res;
-						for (j=0;j < val_number;j++) {
-							avp_type = 0;
-							if (pv_get_avp_name(msg,&it->sname.pvp,&avp_name.n,
-								&avp_type) != 0) {
-								LM_ERR("cannot get avp name [%d/%d]\n",i,j);
-								goto next_avp;
+				if (ret >= 0) {
+					/* TODO: handle more than one avp params */
+					str *avp_alias;
+					avp_type = 0;
+					pv_get_avp_name(msg,&cdb_res->sname.pvp,&avp_name.n,&avp_type);
+					avp_alias = get_avp_name_id(avp_name.n);
+					if (strcmp(avp_alias->s, "avp") == 0) {
+						/* set avps */
+						for (i=key_number-2; i>=0;i=i-2) {
+							int k=i+1;
+							/* reuse existing avp or add a new one, using key name as an alias */
+							str key_name = cdb_reply[i][0].val.s;
+							int avp_id = get_avp_id(&key_name);
+							if (avp_id < 0) {
+								avp_name.n = new_avp_alias(&key_name);
+							} else {
+								avp_name.n = avp_id;
 							}
-
-							switch (cdb_reply[i][j].type) {
+							switch (cdb_reply[k][0].type) {
 								case CDB_INT:
-									avp_val.n = cdb_reply[i][j].val.n;
+									avp_val.n = cdb_reply[k][0].val.n;
 									break;
 								case CDB_STR:
 									avp_type |= AVP_VAL_STR;
-									avp_val.s = cdb_reply[i][j].val.s;
+									avp_val.s = cdb_reply[k][0].val.s;
 									break;
 								default:
-									LM_WARN("Unknown type %d\n",cdb_reply[i][j].type);
+									LM_WARN("Unknown type %d\n",cdb_reply[k][0].type);
 									goto next_avp;
 							}
 							if (add_avp(avp_type,avp_name.n,avp_val) != 0) {
@@ -1562,19 +1572,106 @@ int do_action(struct action* a, struct sip_msg* msg)
 								free_raw_fetch(cdb_reply,val_number,key_number);
 								return -1;
 							}
-next_avp:
-							if (it) {
-								it = it->next;
-								if (it==NULL);
+						}
+						free_raw_fetch(cdb_reply,val_number,key_number);
+					} else if (strcmp(avp_alias->s, "var") == 0) {
+						/* set script vars */
+						/* get prefix from dedicated var */
+						str *prefix = NULL;
+						str prefix_var_name;
+						prefix_var_name.s = "var_prefix";
+						prefix_var_name.len = 10;
+						script_var_t* prefix_var = get_var_by_name(&prefix_var_name);
+						if (prefix_var != 0 && (prefix_var->v.flags&VAR_VAL_STR)) {
+							prefix = &prefix_var->v.value.s;
+						}
+						for (i=key_number-2; i>=0;i=i-2) {
+							int k=i+1;
+							/* use (prefixed) key name as var name */
+							str var_name;
+							str key_name = cdb_reply[i][0].val.s;
+							if (prefix == NULL) {
+								var_name.len = key_name.len;
+								var_name.s = (char*)malloc(var_name.len+1);
+								strcpy(var_name.s, key_name.s);
+							} else {
+								var_name.len = prefix->len + key_name.len;
+								var_name.s = (char*)malloc(var_name.len+1);
+								strcpy(var_name.s, prefix->s);
+								strcat(var_name.s, key_name.s);
+							}
+							/* reuse existing var or add a new one */
+							script_var_t* var = get_var_by_name(&var_name);
+							if (var == 0) {
+								var = add_var(&var_name);
+							}
+							int_str value;
+							int flags;
+							switch (cdb_reply[k][0].type) {
+								case CDB_INT:
+									flags = VAR_VAL_NULL;
+									value.n = cdb_reply[k][0].val.n;
 									break;
+								case CDB_STR:
+									flags = VAR_VAL_STR;
+									value.s = cdb_reply[k][0].val.s;
+									break;
+								default:
+									LM_WARN("Unknown type %d\n",cdb_reply[k][0].type);
+									/* TODO: something to do? */
+							}
+							if (set_var_value(var,&value,flags) == NULL) {
+								LM_ERR("Unable to add script var\n");
+								free_raw_fetch(cdb_reply,val_number,key_number);
+								return -1;
 							}
 						}
+						free_raw_fetch(cdb_reply,val_number,key_number);
+					} else {
+						if (val_number > 0) {
+							for (i=key_number-1; i>=0;i--) {
+								it=cdb_res;
+								for (j=0;j < val_number;j++) {
+									avp_type = 0;
+									if (pv_get_avp_name(msg,&it->sname.pvp,&avp_name.n,
+										&avp_type) != 0) {
+										LM_ERR("cannot get avp name [%d/%d]\n",i,j);
+										goto next_avp;
+									}
+
+
+									switch (cdb_reply[i][j].type) {
+										case CDB_INT:
+											avp_val.n = cdb_reply[i][j].val.n;
+											break;
+										case CDB_STR:
+											avp_type |= AVP_VAL_STR;
+											avp_val.s = cdb_reply[i][j].val.s;
+											break;
+										default:
+											LM_WARN("Unknown type %d\n",cdb_reply[i][j].type);
+											goto next_avp;
+									}
+									if (add_avp(avp_type,avp_name.n,avp_val) != 0) {
+										LM_ERR("Unable to add AVP\n");
+										free_raw_fetch(cdb_reply,val_number,key_number);
+										return -1;
+									}
+		next_avp:
+									if (it) {
+										it = it->next;
+										if (it==NULL);
+											break;
+									}
+								}
+							}
+							free_raw_fetch(cdb_reply,val_number,key_number);
+						}
 					}
-					free_raw_fetch(cdb_reply,val_number,key_number);
 				}
-			}
-			else
+			} else {
 				ret = cachedb_raw_query( &a->elem[0].u.s, &name_s, NULL,0,NULL);
+			}
 			break;
 		case XDBG_T:
 			script_trace("core", "xdbg", msg, a->line) ;
